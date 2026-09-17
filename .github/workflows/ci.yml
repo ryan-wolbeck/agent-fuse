@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package with dev extras
+        run: python -m pip install -e ".[dev]"
+
+      - name: Ruff (lint)
+        run: ruff check .
+
+      - name: Ruff (format check)
+        run: ruff format --check .
+
+      - name: mypy
+        run: mypy
+
+      - name: pytest
+        run: pytest -q
+
+      - name: Smoke test the installed CLI
+        run: |
+          agent-fuse --help
+          agent-fuse doctor || true
+
+  build:
+    name: build & verify package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: python -m pip install build twine
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Validate package metadata
+        run: python -m twine check dist/*
+
+      - name: Install built wheel into a clean venv and smoke test
+        run: |
+          python -m venv /tmp/af-clean-venv
+          /tmp/af-clean-venv/bin/pip install dist/*.whl
+          /tmp/af-clean-venv/bin/agent-fuse --help
+          /tmp/af-clean-venv/bin/agent-fuse doctor || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

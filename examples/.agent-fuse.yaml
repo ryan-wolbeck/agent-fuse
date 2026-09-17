@@ -1,0 +1,28 @@
+# Example Agent Fuse configuration.
+#
+# Copy to .agent-fuse.yaml in your project root (or ~/.config/agent-fuse/config.yaml)
+# and adjust thresholds for your workload. These values are the built-in
+# defaults -- see the README "Configuration" section for what each one means
+# and why they are conservative starting points rather than validated limits.
+
+version: 1
+
+response_rate:
+  enabled: true
+  window_seconds: 600
+  max_responses: 100
+
+token_rate:
+  enabled: true
+  window_seconds: 600
+  max_input_tokens: 2000000
+
+context_replay:
+  enabled: true
+  minimum_input_tokens: 100000
+  max_cached_ratio: 0.90
+
+repeated_tool_call:
+  enabled: true
+  window_seconds: 300
+  max_repetitions: 30

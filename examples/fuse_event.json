@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "event": "fuse.triggered",
+  "timestamp": "2026-05-18T05:47:03.112000+00:00",
+  "provider": "codex",
+  "session_id": "8f21e6b2-0000-0000-0000-000000000000",
+  "rule": "response_rate",
+  "severity": "warning",
+  "window_seconds": 600,
+  "observed": 184,
+  "threshold": 100,
+  "message": "184 responses in the last 600s (threshold 100)"
+}
