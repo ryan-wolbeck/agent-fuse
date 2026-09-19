@@ -16,8 +16,7 @@ from pathlib import Path
 
 import typer
 
-from . import discovery
-from .adapters.codex import CodexAdapter
+from .adapters.base import Adapter
 from .config import ConfigError, FuseConfig, load_config
 from .discovery import FileTailer, SessionFileInfo
 from .engine import RuleEngine, scan_session_file
@@ -34,6 +33,7 @@ from .output import (
     render_watch_normal,
     render_watch_warning,
 )
+from .providers import PROVIDERS, ProviderSpec, installed_providers
 
 app = typer.Typer(
     name="agent-fuse",
@@ -53,11 +53,21 @@ def _load_config_or_exit(config_path: Path | None) -> FuseConfig:
         raise typer.Exit(code=2) from exc
 
 
+def _discover_all(
+    providers: list[ProviderSpec],
+) -> list[tuple[ProviderSpec, SessionFileInfo]]:
+    """Discover session files across providers, newest first overall."""
+    combined = [(p, info) for p in providers for info in p.discover()]
+    combined.sort(key=lambda pair: pair[1].mtime, reverse=True)
+    return combined
+
+
 @app.command()
 def doctor() -> None:
-    """Check that Agent Fuse can find and read local Codex telemetry.
+    """Check that Agent Fuse can find and read local agent telemetry.
 
-    Entirely read-only: never modifies Codex state, config, or session files.
+    Entirely read-only: never modifies any provider's state, config, or
+    session files.
     """
     console = make_console()
     ok = True
@@ -67,41 +77,46 @@ def doctor() -> None:
     render_doctor_line(console, py_ok, f"Python {py_version}")
     ok = ok and py_ok
 
-    codex_present = discovery.codex_installed()
-    render_doctor_line(
-        console,
-        codex_present,
-        "Codex detected" if codex_present else "Codex installation not detected",
-    )
-    if not codex_present:
-        console.print("\nInstall/run the Codex CLI at least once, then re-run `agent-fuse doctor`.")
-        raise typer.Exit(code=3)
-
-    sdir = discovery.sessions_dir()
-    sdir_ok = sdir.is_dir()
-    render_doctor_line(
-        console,
-        sdir_ok,
-        "Session directory readable" if sdir_ok else f"Session directory not found: {sdir}",
-    )
-    ok = ok and sdir_ok
-
-    files = discovery.discover_session_files() if sdir_ok else []
-    render_doctor_line(console, True, f"{len(files)} session files discovered")
-
-    latest_ok = True
-    if files:
-        try:
-            with open(files[0].path, encoding="utf-8", errors="replace") as fh:
-                fh.readline()
-        except OSError:
-            latest_ok = False
+    active = installed_providers()
+    for provider in PROVIDERS:
+        present = provider in active
         render_doctor_line(
             console,
-            latest_ok,
-            "Latest session readable" if latest_ok else "Latest session file unreadable",
+            present,
+            f"{provider.display_name} detected"
+            if present
+            else f"{provider.display_name} installation not detected",
         )
-        ok = ok and latest_ok
+
+    if not active:
+        console.print(
+            "\nNo supported agent installation was found (Codex or Claude Code)."
+            " Install/run one at least once, then re-run `agent-fuse doctor`."
+        )
+        raise typer.Exit(code=3)
+
+    total_files = 0
+    for provider in active:
+        files = provider.discover()
+        total_files += len(files)
+        render_doctor_line(
+            console, True, f"{len(files)} {provider.display_name} session files discovered"
+        )
+        if files:
+            try:
+                with open(files[0].path, encoding="utf-8", errors="replace") as fh:
+                    fh.readline()
+                latest_ok = True
+            except OSError:
+                latest_ok = False
+            render_doctor_line(
+                console,
+                latest_ok,
+                f"Latest {provider.display_name} session readable"
+                if latest_ok
+                else f"Latest {provider.display_name} session file unreadable",
+            )
+            ok = ok and latest_ok
 
     config_ok = True
     try:
@@ -133,24 +148,30 @@ def inspect(
     session content -- only counts and status derived from them.
     """
     console = make_console()
-    if not discovery.codex_installed():
-        console.print("No supported agent telemetry detected (Codex not found).")
+    active = installed_providers()
+    if not active:
+        console.print("No supported agent telemetry detected (Codex or Claude Code not found).")
         raise typer.Exit(code=3)
 
     config = _load_config_or_exit(None)
-    all_files = discovery.discover_session_files()
+    all_pairs = _discover_all(active)
     now_epoch = time.time()
-    recent = [f for f in all_files if discovery.is_recent(f, now_epoch, recent_minutes * 60)]
+    recent = [
+        (p, info)
+        for p, info in all_pairs
+        if info.mtime is not None and (now_epoch - info.mtime) <= recent_minutes * 60
+    ]
 
-    rows: list[tuple[str, str, int, int, str]] = []
+    rows: list[tuple[str, str, str, int, int, str]] = []
     events_sampled = 0
-    for info in recent[:limit]:
-        result = scan_session_file(info.path, info.session_id_hint, config)
+    for provider, info in recent[:limit]:
+        result = scan_session_file(info.path, info.session_id_hint, config, provider.make_adapter)
         events_sampled += result.diagnostics.events_emitted
         severity = result.severity or "normal"
         age = _format_age(now_epoch - info.mtime)
         rows.append(
             (
+                provider.display_name,
                 result.session_id,
                 age,
                 result.metrics.total_responses,
@@ -161,8 +182,8 @@ def inspect(
 
     render_inspect_summary(
         console,
-        provider="Codex",
-        sessions_discovered=len(all_files),
+        providers=[p.display_name for p in active],
+        sessions_discovered=len(all_pairs),
         active_recent=len(recent),
         events_sampled=events_sampled,
     )
@@ -186,7 +207,7 @@ def scan(
     config_path: Path | None = typer.Option(None, "--config", help="Path to .agent-fuse.yaml"),
     format: str = typer.Option("text", "--format", help="Output format: text or json"),
 ) -> None:
-    """Run deterministic rules against existing historical Codex sessions.
+    """Run deterministic rules against existing historical sessions.
 
     Read-only dry-run analysis -- lets you see whether your existing
     history already contains obvious runaway patterns, without waiting for
@@ -196,17 +217,24 @@ def scan(
         typer.echo("Invalid --format: expected 'text' or 'json'", err=True)
         raise typer.Exit(code=2)
 
-    if not discovery.codex_installed():
-        typer.echo("No supported agent telemetry detected (Codex not found).", err=True)
+    active = installed_providers()
+    if not active:
+        typer.echo(
+            "No supported agent telemetry detected (Codex or Claude Code not found).", err=True
+        )
         raise typer.Exit(code=3)
 
     config = _load_config_or_exit(config_path)
-    files = discovery.discover_session_files()
+    pairs = _discover_all(active)
 
     console = make_console(quiet=(format == "json"))
-    console.print(f"Scanning {len(files)} Codex sessions...")
+    provider_names = ", ".join(p.display_name for p in active)
+    console.print(f"Scanning {len(pairs)} sessions across {provider_names}...")
 
-    results = [scan_session_file(f.path, f.session_id_hint, config) for f in files]
+    results = [
+        scan_session_file(info.path, info.session_id_hint, config, provider.make_adapter)
+        for provider, info in pairs
+    ]
 
     normal = sum(1 for r in results if r.severity is None)
     warning = sum(1 for r in results if r.severity == "warning")
@@ -231,6 +259,7 @@ def scan(
             "severe": severe,
             "sessions": [
                 {
+                    "provider": r.metrics.provider,
                     "session_id": r.session_id,
                     "severity": r.severity,
                     "total_responses": r.metrics.total_responses,
@@ -275,7 +304,7 @@ def watch(
         5.0, help="How often to check for newly created session files."
     ),
 ) -> None:
-    """Watch local Codex sessions live and warn on runaway patterns.
+    """Watch local agent sessions live and warn on runaway patterns.
 
     Agent Fuse does NOT terminate the process. It observes and warns.
     """
@@ -283,32 +312,37 @@ def watch(
         typer.echo("Invalid --format: expected 'text' or 'jsonl'", err=True)
         raise typer.Exit(code=2)
 
-    if not discovery.codex_installed():
-        typer.echo("No supported agent telemetry detected (Codex not found).", err=True)
+    active = installed_providers()
+    if not active:
+        typer.echo(
+            "No supported agent telemetry detected (Codex or Claude Code not found).", err=True
+        )
         raise typer.Exit(code=3)
 
     config = _load_config_or_exit(config_path)
     console = make_console(quiet=(format == "jsonl"))
     console.print("Agent Fuse")
-    console.print("Watching Codex sessions...")
+    console.print(f"Watching {', '.join(p.display_name for p in active)} sessions...")
 
     rule_engine = RuleEngine(config)
     registry = MetricsRegistry(max_window_seconds=config.max_window_seconds())
     tailers: dict[Path, FileTailer] = {}
-    adapters: dict[Path, CodexAdapter] = {}
+    adapters: dict[Path, Adapter] = {}
+    path_to_provider_name: dict[Path, str] = {}
     path_to_session_id: dict[Path, str] = {}
-    last_triggered: dict[str, frozenset[str]] = {}
+    last_triggered: dict[tuple[str, str], frozenset[str]] = {}
     any_triggered = False
 
-    def attach(info: SessionFileInfo) -> None:
+    def attach(provider: ProviderSpec, info: SessionFileInfo) -> None:
         tailers[info.path] = FileTailer(info.path)
-        adapters[info.path] = CodexAdapter(info.session_id_hint)
+        adapters[info.path] = provider.make_adapter(info.session_id_hint)
+        path_to_provider_name[info.path] = provider.name
         path_to_session_id[info.path] = info.session_id_hint
 
     now_epoch = time.time()
-    for info in discovery.discover_session_files():
-        if discovery.is_recent(info, now_epoch, recent_minutes * 60):
-            attach(info)
+    for provider, info in _discover_all(active):
+        if (now_epoch - info.mtime) <= recent_minutes * 60:
+            attach(provider, info)
 
     last_discover = time.monotonic()
 
@@ -319,13 +353,15 @@ def watch(
                 adapter = adapters[path]
                 new_lines = tailer.read_new_lines()
                 if tailer.gone:
+                    provider_name = path_to_provider_name.get(path)
                     session_id = path_to_session_id.get(path)
-                    if session_id:
-                        registry.drop(session_id)
-                        last_triggered.pop(session_id, None)
+                    if provider_name and session_id:
+                        registry.drop(provider_name, session_id)
+                        last_triggered.pop((provider_name, session_id), None)
                     tailer.close()
                     del tailers[path]
                     del adapters[path]
+                    path_to_provider_name.pop(path, None)
                     path_to_session_id.pop(path, None)
                     continue
 
@@ -342,41 +378,43 @@ def watch(
                             results = rule_engine.evaluate(metrics, event.timestamp)
                             triggered = RuleEngine.triggered(results)
                             triggered_names = frozenset(r.rule for r in triggered)
-                            session_id = metrics.session_id
+                            session_key = (metrics.provider, metrics.session_id)
                             if triggered_names and triggered_names != last_triggered.get(
-                                session_id
+                                session_key
                             ):
                                 any_triggered = True
-                                last_triggered[session_id] = triggered_names
+                                last_triggered[session_key] = triggered_names
                                 if format == "jsonl":
                                     for fuse_event in RuleEngine.to_fuse_events(
-                                        "codex", session_id, event.timestamp, results
+                                        metrics.provider,
+                                        metrics.session_id,
+                                        event.timestamp,
+                                        results,
                                     ):
                                         typer.echo(emit_fuse_event_json(fuse_event))
                                 else:
                                     render_watch_warning(
                                         console,
-                                        session_id=session_id,
+                                        session_id=metrics.session_id,
                                         session=metrics,
                                         results=results,
                                         now=event.timestamp,
                                     )
-                            elif not triggered_names and last_triggered.get(session_id):
-                                last_triggered.pop(session_id, None)
+                            elif not triggered_names and last_triggered.get(session_key):
+                                last_triggered.pop(session_key, None)
 
                 if had_activity and not quiet and format == "text":
+                    provider_name = path_to_provider_name[path]
                     session_id = path_to_session_id[path]
-                    if session_id not in last_triggered:
+                    if (provider_name, session_id) not in last_triggered:
                         render_watch_normal(console, session_id)
 
             if time.monotonic() - last_discover >= discover_seconds:
                 last_discover = time.monotonic()
                 now_epoch = time.time()
-                for info in discovery.discover_session_files():
-                    if info.path not in tailers and discovery.is_recent(
-                        info, now_epoch, recent_minutes * 60
-                    ):
-                        attach(info)
+                for provider, info in _discover_all(active):
+                    if info.path not in tailers and (now_epoch - info.mtime) <= recent_minutes * 60:
+                        attach(provider, info)
 
             time.sleep(poll_seconds)
     except KeyboardInterrupt:

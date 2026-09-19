@@ -12,12 +12,11 @@ runner = CliRunner()
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def test_doctor_no_codex_installed(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "nonexistent"))
-    monkeypatch.setattr("shutil.which", lambda _: None)
+def test_doctor_no_provider_installed(isolated_agents) -> None:
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 3
-    assert "not detected" in result.stdout
+    assert "Codex installation not detected" in result.stdout
+    assert "Claude Code installation not detected" in result.stdout
 
 
 def test_doctor_success(codex_home) -> None:
@@ -29,7 +28,7 @@ def test_doctor_success(codex_home) -> None:
 def test_scan_no_sessions_is_clean_exit(codex_home) -> None:
     result = runner.invoke(app, ["scan"])
     assert result.exit_code == 0
-    assert "Scanning 0 Codex sessions" in result.stdout
+    assert "Scanning 0 sessions across Codex" in result.stdout
 
 
 def test_scan_reports_normal_session(codex_home, new_session_id) -> None:

@@ -1,7 +1,7 @@
-"""Locating and efficiently reading Codex's local session files.
+"""Locating and efficiently reading local agent session files.
 
 All access here is read-only. Nothing in this module ever writes to,
-truncates, or deletes anything under the Codex home directory.
+truncates, or deletes anything under a vendor's home directory.
 """
 
 from __future__ import annotations
@@ -46,14 +46,39 @@ def codex_installed() -> bool:
 def session_id_hint_from_path(path: Path) -> str:
     """Best-effort session identifier derived from the filename alone.
 
-    Used only until (or unless) the real id is read from the session_meta
-    line inside the file; falls back to the filename stem for files that
-    don't match Codex's usual `rollout-<timestamp>-<uuid>.jsonl` pattern.
+    Used only until (or unless) the real id is read from inside the file;
+    falls back to the filename stem for files that don't contain a
+    recognizable UUID (Codex's `rollout-<timestamp>-<uuid>.jsonl`, Claude
+    Code's bare `<uuid>.jsonl`).
     """
     match = _UUID_RE.search(path.name)
     if match:
         return match.group(1)
     return path.stem
+
+
+def claude_home() -> Path:
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".claude"
+
+
+def claude_projects_dir() -> Path:
+    return claude_home() / "projects"
+
+
+def claude_binary_on_path() -> bool:
+    return shutil.which("claude") is not None
+
+
+def claude_code_installed() -> bool:
+    """True if we have any evidence of a local Claude Code installation.
+
+    Read-only check: only looks for the home directory or the `claude`
+    executable, never modifies anything.
+    """
+    return claude_home().is_dir() or claude_binary_on_path()
 
 
 @dataclass(frozen=True)
@@ -64,18 +89,13 @@ class SessionFileInfo:
     size: int
 
 
-def discover_session_files(root: Path | None = None) -> list[SessionFileInfo]:
-    """List all Codex rollout files, newest first.
-
-    Streaming-friendly: this only stats file metadata, it never opens or
-    reads file contents.
-    """
-    base = root if root is not None else sessions_dir()
-    if not base.is_dir():
+def _discover_jsonl_files(root: Path) -> list[SessionFileInfo]:
+    """Stat (never read) every `*.jsonl` file under `root`, newest first."""
+    if not root.is_dir():
         return []
 
     infos: list[SessionFileInfo] = []
-    for path in base.rglob("*.jsonl"):
+    for path in root.rglob("*.jsonl"):
         try:
             stat = path.stat()
         except OSError:
@@ -90,6 +110,27 @@ def discover_session_files(root: Path | None = None) -> list[SessionFileInfo]:
         )
     infos.sort(key=lambda info: info.mtime, reverse=True)
     return infos
+
+
+def discover_session_files(root: Path | None = None) -> list[SessionFileInfo]:
+    """List all Codex rollout files, newest first.
+
+    Streaming-friendly: this only stats file metadata, it never opens or
+    reads file contents.
+    """
+    return _discover_jsonl_files(root if root is not None else sessions_dir())
+
+
+def discover_claude_code_session_files(root: Path | None = None) -> list[SessionFileInfo]:
+    """List all Claude Code project transcript files, newest first.
+
+    Note: the *parent directory* of each file encodes the sanitized project
+    working-directory path (e.g. `/home/alice/proj` -> `-home-alice-proj`);
+    only `path` (needed to open the file) and the UUID-based
+    `session_id_hint` are returned here, and callers must not surface the
+    parent directory name in any user-facing output.
+    """
+    return _discover_jsonl_files(root if root is not None else claude_projects_dir())
 
 
 def is_recent(info: SessionFileInfo, now_epoch: float, recent_window_seconds: int = 1800) -> bool:

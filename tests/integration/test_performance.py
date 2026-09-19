@@ -7,6 +7,7 @@ unbounded memory growth as session count/size grows, per the project's
 
 from datetime import UTC, datetime, timedelta
 
+from agent_fuse.adapters.codex import CodexAdapter
 from agent_fuse.config import default_config
 from agent_fuse.engine import scan_session_file
 from agent_fuse.metrics import SessionMetrics
@@ -68,7 +69,7 @@ def test_scan_session_file_handles_many_sessions_efficiently(tmp_path, codex_hom
     files = discover_session_files()
     assert len(files) == 200
     for info in files:
-        result = scan_session_file(info.path, info.session_id_hint, config)
+        result = scan_session_file(info.path, info.session_id_hint, config, CodexAdapter)
         assert result.metrics.total_responses == 1
 
 
@@ -87,5 +88,5 @@ def test_scan_session_file_streams_large_single_session_without_loading_whole_fi
     assert path.stat().st_size > 100_000  # a genuinely large-ish file
 
     config = default_config()
-    result = scan_session_file(path, session_id, config)
+    result = scan_session_file(path, session_id, config, CodexAdapter)
     assert result.metrics.total_responses == 3_000

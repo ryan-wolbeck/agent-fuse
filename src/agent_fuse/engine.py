@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from .adapters.base import AdapterDiagnostics
-from .adapters.codex import CodexAdapter
+from .adapters.base import Adapter, AdapterDiagnostics
 from .config import FuseConfig
 from .metrics import SessionMetrics
 from .models import EventType, FuseEvent, RuleResult
@@ -81,7 +81,7 @@ class RuleEngine:
 
 @dataclass
 class SessionScanResult:
-    """Outcome of replaying one Codex session file front to back.
+    """Outcome of replaying one session file front to back.
 
     `worst_results` captures the rule evaluation at whichever point in the
     session's own timeline had the most rules triggered simultaneously --
@@ -96,13 +96,22 @@ class SessionScanResult:
     diagnostics: AdapterDiagnostics
 
 
-def scan_session_file(path: Path, session_id_hint: str, config: FuseConfig) -> SessionScanResult:
-    """Replay a Codex rollout file, evaluating rules as of each event's own
-    timestamp -- i.e. reconstructing what `watch` would have reported had it
-    been running at the time. This is what makes `scan` useful on sessions
-    that finished days or weeks ago.
+def scan_session_file(
+    path: Path,
+    session_id_hint: str,
+    config: FuseConfig,
+    make_adapter: Callable[[str], Adapter],
+) -> SessionScanResult:
+    """Replay one provider's session file, evaluating rules as of each
+    event's own timestamp -- i.e. reconstructing what `watch` would have
+    reported had it been running at the time. This is what makes `scan`
+    useful on sessions that finished days or weeks ago.
+
+    `make_adapter` is any provider's adapter constructor (e.g.
+    `CodexAdapter`, `ClaudeCodeAdapter`) -- the engine itself has no
+    vendor-specific knowledge, by design.
     """
-    adapter = CodexAdapter(session_id_hint)
+    adapter = make_adapter(session_id_hint)
     window = config.max_window_seconds()
     metrics = SessionMetrics(
         session_id=session_id_hint, provider=adapter.provider, max_window_seconds=window

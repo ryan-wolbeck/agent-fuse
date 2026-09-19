@@ -15,7 +15,7 @@ agent-fuse watch
 
 ```
 Agent Fuse
-Watching Codex sessions...
+Watching Codex, Claude Code sessions...
 ✓ session a912... normal
 ✓ session 29ca... normal
 ⚠ RUNAWAY PATTERN
@@ -38,7 +38,7 @@ Triggered rules:
 Agent Fuse does NOT terminate the process. Inspect the session before continuing.
 ```
 
-**Agent Fuse v0.1 is read-only. It warns; it does not terminate agents.**
+**Agent Fuse is read-only. It warns; it does not terminate agents.**
 
 ## Why not just use existing usage dashboards or the agent's own loop detection?
 
@@ -60,24 +60,50 @@ try to be a complete observability or cost-management solution.
 
 ```bash
 pip install agent-fuse
-agent-fuse doctor   # confirm Agent Fuse can find your local Codex telemetry
+agent-fuse doctor   # confirm Agent Fuse can find your local agent telemetry
 agent-fuse scan     # dry-run the rules against your existing session history
 agent-fuse watch    # monitor live sessions and warn on runaway patterns
 ```
+
+`agent-fuse` automatically watches every supported agent it finds installed
+— if you have both Codex and Claude Code, `doctor`/`scan`/`watch`/`inspect`
+all cover both without any extra flags.
 
 ## Supported agents
 
 | Agent | Status | Telemetry source |
 |---|---|---|
 | Codex CLI | Supported | `$CODEX_HOME/sessions/**/*.jsonl` rollout files (verified against Codex CLI 0.150.1 and the public `openai/codex` protocol source) |
-| Claude Code | Not yet implemented | See [Roadmap](#roadmap) |
+| Claude Code | Supported | `$CLAUDE_CONFIG_DIR/projects/**/*.jsonl` transcript files (verified against Claude Code 2.1.269) |
 | OpenCode | Not yet implemented | See [Roadmap](#roadmap) |
 
-Codex was prioritized for v0.1 because its local rollout format is the
-richest, best-documented source of the telemetry these rules need (per-turn
-completion events, token usage with cache breakdown, and tool call/result
-records). A fragile, half-working second adapter would have cost more trust
-than it was worth; a Claude Code adapter is the top roadmap item.
+Both adapters were built against real local session data rather than
+guessed from documentation, and their module docstrings
+([adapters/codex.py](src/agent_fuse/adapters/codex.py),
+[adapters/claude_code.py](src/agent_fuse/adapters/claude_code.py)) spell
+out exactly which fields are read and which are deliberately never touched.
+Claude Code's transcript format differs from Codex's in a few
+adapter-relevant ways worth knowing about:
+
+- One Claude Code API response is written as *multiple* JSONL lines (one
+  per content block — thinking/text/tool_use) that share the same
+  `message.id`; the adapter counts exactly one model response per unique
+  id, not one per line.
+- Token accounting follows Anthropic's usage shape, which splits input
+  into `input_tokens` (fresh), `cache_creation_input_tokens` (newly
+  cached, not itself replay), and `cache_read_input_tokens` (served from
+  a previous cache — this is what `context_replay` measures).
+- Claude Code subagent ("Task" tool) turns are interleaved into the same
+  transcript file as the parent session (flagged `isSidechain: true`)
+  rather than living in a separate file the way a Codex subagent thread
+  does. The adapter folds sidechain activity into the parent session's
+  metrics rather than fabricating subagent lifecycle events the source
+  data doesn't clearly delineate — which also means a runaway subagent
+  still trips its parent session's rules.
+- A Claude Code session file's *parent directory* encodes the project's
+  working-directory path (e.g. `/home/alice/proj` → `-home-alice-proj`).
+  Agent Fuse only ever uses the session UUID (the filename) as an
+  identifier and never surfaces that directory name in any output.
 
 ## Rules
 
@@ -177,7 +203,7 @@ bumped on any breaking change; see [tests/unit/test_fuse_event_schema.py](tests/
 | 0 | Success — no rule violations observed |
 | 1 | A rule violation was detected (`scan`, `watch`) |
 | 2 | Configuration or input error |
-| 3 | Provider/discovery failure (e.g. Codex not found) |
+| 3 | Provider/discovery failure (e.g. no supported agent found) |
 
 `Ctrl+C` during `watch` is a clean shutdown, not a crash — exit code
 reflects whether anything triggered during that run.
@@ -197,14 +223,17 @@ agent history. By default and by design it:
   "an error occurred", not the underlying text)
 - **never executes** anything found inside a session history
 - is strictly **read-only** against vendor state: it never modifies,
-  truncates, rewrites, or deletes anything under `$CODEX_HOME`
+  truncates, rewrites, or deletes anything under `$CODEX_HOME` or
+  `$CLAUDE_CONFIG_DIR`
+- never surfaces a Claude Code session's parent directory name, which
+  encodes the project's working-directory path
 
 See [SECURITY.md](SECURITY.md) for the full policy and how to report a
 privacy or security issue.
 
 ## Read-only guarantee
 
-Agent Fuse v0.1 never terminates, pauses, signals, or otherwise touches an
+Agent Fuse never terminates, pauses, signals, or otherwise touches an
 agent process, and never modifies session files or vendor configuration.
 It observes and warns — that's the entire product surface for this
 release. Explicit, user-configured actions (see [Roadmap](#roadmap)) may
@@ -214,19 +243,27 @@ behavior.
 ## Architecture
 
 ```
-Codex local telemetry
+Claude Code ─→ ClaudeCodeAdapter ─┐
+Codex ───────→ CodexAdapter ──────┼→ Canonical Agent Events → Rolling Metrics → Rules → Fuse Events
+OpenCode ────→ (not implemented) ─┘
+```
+
+In more detail, per provider:
+
+```
+Provider's local telemetry
         │
         ▼
-   CodexAdapter            (vendor schema lives ONLY here)
+     Adapter                (vendor schema lives ONLY here)
         │
         ▼
 Canonical Agent Events      (models.py — vendor-neutral)
         │
         ▼
-Rolling Session Metrics     (metrics.py — bounded deques + lifetime counters)
-        │
+Rolling Session Metrics     (metrics.py — bounded deques + lifetime counters,
+        │                    keyed by (provider, session_id))
         ▼
-Deterministic Rules         (rules/ — independently testable)
+Deterministic Rules         (rules/ — independently testable, provider-agnostic)
         │
         ▼
    Fuse Events
@@ -235,29 +272,38 @@ Deterministic Rules         (rules/ — independently testable)
 ```
 
 Adapters are a replaceable compatibility boundary: nothing above the
-adapter layer knows Codex's JSON shapes exist. A future adapter (Claude
-Code, OpenCode, ...) only needs to produce the same canonical `AgentEvent`
-type; no other layer changes.
+adapter layer knows either provider's JSON shapes exist — `metrics.py`,
+`engine.py`, `rules/`, and `output.py` are entirely vendor-neutral.
+`src/agent_fuse/providers.py` is the single place that lists which
+adapters exist and how to find each one's session files; adding a future
+adapter (OpenCode, ...) means adding one entry there, not touching the
+rules or metrics layers.
 
 ## Limitations
 
 Read this section before trusting Agent Fuse for anything important.
 
-- **Codex-only in v0.1.** No Claude Code or OpenCode adapter yet.
+- **No OpenCode adapter yet.** Codex and Claude Code are supported; see
+  [Roadmap](#roadmap).
 - **Not anomaly detection.** Every rule is a fixed threshold. It will miss
   slow-burn or subtle runaway behavior that never crosses a threshold, and
   it can false-positive on a workload that's simply large by design.
-- **`SESSION_END` is never emitted** for Codex — the rollout format has no
-  explicit "session ended" event, so Agent Fuse infers staleness from file
+- **`SESSION_END` is never emitted** by either adapter — neither Codex's
+  rollout format nor Claude Code's transcript format has an explicit
+  "session ended" event, so Agent Fuse infers staleness from file
   modification time (`discovery.py`) rather than fabricating one.
-  Similarly, Codex subagent threads appear as separate session files
-  linked by metadata, not as `SUBAGENT_START`/`SUBAGENT_END` events.
-  Both event types exist in the canonical model for forward compatibility
-  with adapters that can support them, not because Codex does.
-  \- **An in-flight turn with no `task_complete` yet is not counted.**
-  If a session ends mid-turn, that final turn is not reflected in metrics;
-  Agent Fuse does not fabricate a response event for a turn it never saw
-  finish.
+- **`SUBAGENT_START`/`SUBAGENT_END` are never emitted.** Codex subagent
+  threads appear as separate session files linked by metadata; Claude
+  Code subagent ("Task") turns are interleaved into the parent session's
+  own file, flagged `isSidechain: true`, with no clean start/stop marker.
+  Neither adapter fabricates a lifecycle event the source data doesn't
+  clearly delineate — both event types exist in the canonical model for
+  forward compatibility with an adapter that can support them.
+- **An in-flight turn with no confirmed completion is not counted.** If a
+  session ends mid-turn (no Codex `task_complete`, or a Claude Code
+  response with no observed `message.id`), that final turn is not
+  reflected in metrics; Agent Fuse does not fabricate a response event for
+  a turn it never saw finish.
 - **Rules are conservative by design and default thresholds are
   heuristics**, not a validated model of "normal" — see
   [Configuration](#configuration).
@@ -269,10 +315,8 @@ Read this section before trusting Agent Fuse for anything important.
 
 ## Roadmap
 
-Not implemented in v0.1, and not part of this release's scope:
+Not implemented yet, and not part of the current scope:
 
-- Claude Code adapter (top priority — pending investigation of a stable
-  local telemetry source with sufficient tool/token detail)
 - OpenCode adapter
 - OpenTelemetry input
 - Additional deterministic rules (e.g. subagent fan-out / lineage limits,

@@ -151,25 +151,35 @@ class SessionMetrics:
 
 
 class MetricsRegistry:
-    """Tracks SessionMetrics per session_id, bounded by rule window config."""
+    """Tracks SessionMetrics per (provider, session_id), bounded by rule
+    window config.
+
+    Keyed on the pair rather than session_id alone: session IDs are
+    vendor-generated UUIDs, and with more than one provider adapter now
+    supported there is no guarantee two different providers' IDs can't
+    collide (or, more mundanely, that test fixtures across providers won't
+    reuse simple ids like "s1"). A collision here would silently merge two
+    unrelated sessions' metrics.
+    """
 
     def __init__(self, max_window_seconds: int = 600) -> None:
         self.max_window_seconds = max_window_seconds
-        self._sessions: dict[str, SessionMetrics] = {}
+        self._sessions: dict[tuple[str, str], SessionMetrics] = {}
 
-    def get_or_create(self, session_id: str, provider: str) -> SessionMetrics:
-        metrics = self._sessions.get(session_id)
+    def get_or_create(self, provider: str, session_id: str) -> SessionMetrics:
+        key = (provider, session_id)
+        metrics = self._sessions.get(key)
         if metrics is None:
             metrics = SessionMetrics(
                 session_id=session_id,
                 provider=provider,
                 max_window_seconds=self.max_window_seconds,
             )
-            self._sessions[session_id] = metrics
+            self._sessions[key] = metrics
         return metrics
 
     def record(self, event: AgentEvent) -> SessionMetrics:
-        metrics = self.get_or_create(event.session_id, event.provider)
+        metrics = self.get_or_create(event.provider, event.session_id)
         metrics.record_event(event)
         return metrics
 
@@ -179,8 +189,8 @@ class MetricsRegistry:
     def __len__(self) -> int:
         return len(self._sessions)
 
-    def get(self, session_id: str) -> SessionMetrics | None:
-        return self._sessions.get(session_id)
+    def get(self, provider: str, session_id: str) -> SessionMetrics | None:
+        return self._sessions.get((provider, session_id))
 
-    def drop(self, session_id: str) -> None:
-        self._sessions.pop(session_id, None)
+    def drop(self, provider: str, session_id: str) -> None:
+        self._sessions.pop((provider, session_id), None)

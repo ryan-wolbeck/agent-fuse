@@ -114,7 +114,7 @@ def test_registry_creates_and_reuses_session_metrics() -> None:
     registry = MetricsRegistry(max_window_seconds=600)
     event = response_event(T0, idx=0)
     m1 = registry.record(event)
-    m2 = registry.get("s1")
+    m2 = registry.get("codex", "s1")
     assert m1 is m2
     assert len(registry) == 1
 
@@ -122,6 +122,6 @@ def test_registry_creates_and_reuses_session_metrics() -> None:
 def test_registry_drop_removes_session() -> None:
     registry = MetricsRegistry(max_window_seconds=600)
     registry.record(response_event(T0, idx=0))
-    registry.drop("s1")
-    assert registry.get("s1") is None
+    registry.drop("codex", "s1")
+    assert registry.get("codex", "s1") is None
     assert len(registry) == 0

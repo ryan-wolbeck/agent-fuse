@@ -126,13 +126,13 @@ def render_doctor_line(console: Console, ok: bool, message: str) -> None:
 def render_inspect_summary(
     console: Console,
     *,
-    provider: str,
+    providers: list[str],
     sessions_discovered: int,
     active_recent: int,
     events_sampled: int,
 ) -> None:
     console.print(Text("Agent Fuse", style="bold"))
-    console.print(f"Provider: {provider}")
+    console.print(f"Providers: {', '.join(providers)}")
     console.print(f"Sessions discovered: {sessions_discovered}")
     console.print(f"Active/recent:       {active_recent}")
     console.print(f"Events sampled:      {events_sampled}")
@@ -140,17 +140,19 @@ def render_inspect_summary(
 
 def render_inspect_table(
     console: Console,
-    rows: list[tuple[str, str, int, int, str]],
+    rows: list[tuple[str, str, str, int, int, str]],
 ) -> None:
     table = Table(title="Recent sessions")
+    table.add_column("PROVIDER")
     table.add_column("SESSION")
     table.add_column("AGE")
     table.add_column("RESPONSES", justify="right")
     table.add_column("TOOLS", justify="right")
     table.add_column("STATUS")
-    for session_id, age, responses, tools, status in rows:
+    for provider_name, session_id, age, responses, tools, status in rows:
         status_style = "green" if status == "normal" else "yellow"
         table.add_row(
+            provider_name,
             short_id(session_id),
             age,
             str(responses),
@@ -168,7 +170,7 @@ def render_scan_progress_summary(
     warning: int,
     severe: int,
 ) -> None:
-    console.print(f"Scanned {total} Codex sessions.")
+    console.print(f"Scanned {total} sessions.")
 
     normal_line = Text()
     normal_line.append("✓", style="green")
