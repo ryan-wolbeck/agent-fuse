@@ -25,7 +25,7 @@ terminal output, JSON/JSONL output, logs, or exceptions), or a way for it
 to write to or execute something from vendor state, please report it
 privately rather than opening a public issue:
 
-- Open a [GitHub Security Advisory](https://github.com/agent-fuse/agent-fuse/security/advisories/new)
+- Open a [GitHub Security Advisory](https://github.com/ryan-wolbeck/agent-fuse/security/advisories/new)
   for the repository, or
 - Email the maintainers listed in the repository's GitHub profile.
 

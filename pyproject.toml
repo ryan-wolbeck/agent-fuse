@@ -42,10 +42,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/agent-fuse/agent-fuse"
-Repository = "https://github.com/agent-fuse/agent-fuse"
-Issues = "https://github.com/agent-fuse/agent-fuse/issues"
-Changelog = "https://github.com/agent-fuse/agent-fuse/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/ryan-wolbeck/agent-fuse"
+Repository = "https://github.com/ryan-wolbeck/agent-fuse"
+Issues = "https://github.com/ryan-wolbeck/agent-fuse/issues"
+Changelog = "https://github.com/ryan-wolbeck/agent-fuse/blob/main/CHANGELOG.md"
 
 [project.scripts]
 agent-fuse = "agent_fuse.cli:app"

@@ -10,7 +10,7 @@ ideas, but because they're a different product.
 ## Development setup
 
 ```bash
-git clone https://github.com/agent-fuse/agent-fuse
+git clone https://github.com/ryan-wolbeck/agent-fuse
 cd agent-fuse
 python -m venv .venv
 source .venv/bin/activate
